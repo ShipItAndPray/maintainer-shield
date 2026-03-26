@@ -1,0 +1,88 @@
+name: 'Maintainer Shield'
+description: 'Detect AI slop PRs, auto-triage issues, and score contributor reputation. Built by maintainers, for maintainers.'
+author: 'somepalli'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+    default: ${{ github.token }}
+
+  # PR Slop Detection
+  slop-detection:
+    description: 'Enable AI slop PR detection'
+    required: false
+    default: 'true'
+
+  slop-action:
+    description: 'Action on slop PRs: comment, label, close'
+    required: false
+    default: 'comment'
+
+  slop-label:
+    description: 'Label to apply to detected slop PRs'
+    required: false
+    default: 'ai-slop'
+
+  slop-threshold:
+    description: 'Min failed checks before flagging (1-10). Higher = fewer false positives.'
+    required: false
+    default: '4'
+
+  # Issue Triage
+  issue-triage:
+    description: 'Enable automatic issue labeling and triage'
+    required: false
+    default: 'true'
+
+  issue-labels:
+    description: 'Comma-separated labels to auto-apply (bug,feature,question,documentation,duplicate,good-first-issue)'
+    required: false
+    default: 'bug,feature,question,documentation'
+
+  # Reputation Scoring
+  reputation-check:
+    description: 'Enable contributor reputation scoring'
+    required: false
+    default: 'true'
+
+  reputation-min-score:
+    description: 'Minimum reputation score (0-100) before flagging for manual review'
+    required: false
+    default: '20'
+
+  # General
+  exempt-users:
+    description: 'Comma-separated usernames to always exempt'
+    required: false
+    default: ''
+
+  exempt-roles:
+    description: 'Comma-separated roles to exempt (OWNER,MEMBER,COLLABORATOR)'
+    required: false
+    default: 'OWNER,MEMBER,COLLABORATOR'
+
+  dry-run:
+    description: 'Log results without taking action'
+    required: false
+    default: 'false'
+
+outputs:
+  slop-score:
+    description: 'Slop detection score (0-10)'
+  reputation-score:
+    description: 'Author reputation score (0-100)'
+  action-taken:
+    description: 'Action taken (none, commented, labeled, closed)'
+  checks-failed:
+    description: 'Number of checks that failed'
+  report:
+    description: 'Full analysis report as JSON'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

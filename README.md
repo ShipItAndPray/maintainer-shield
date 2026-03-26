@@ -1,0 +1,160 @@
+# Maintainer Shield
+
+**Stop AI slop PRs. Auto-triage issues. Score contributor reputation. One action.**
+
+Open source maintainers are drowning. [120+ slop PRs/month](https://www.theregister.com/2026/02/03/github_kill_switch_pull_requests_ai/) on popular repos. [60% of maintainers unpaid](https://byteiota.com/open-source-maintainer-crisis-60-unpaid-burnout-hits-44/). [44% burning out](https://medium.com/@sohail_saifii/the-open-source-maintainer-burnout-crisis-nobodys-fixing-5cf4b459a72b). [cURL shut down its bug bounty](https://www.theregister.com/2026/02/18/godot_maintainers_struggle_with_draining/). [Ghostty bans AI submitters](https://www.jeffgeerling.com/blog/2026/ai-is-destroying-open-source/).
+
+Maintainer Shield fights back.
+
+## What It Does
+
+| Feature | Description |
+|---------|------------|
+| **Slop Detection** | 15 checks across branch names, descriptions, commit patterns, timing, file analysis, and behavioral signals |
+| **Issue Triage** | Auto-labels issues as bug/feature/question/docs, detects duplicates |
+| **Reputation Scoring** | Scores contributors 0-100 based on account age, history, merged PRs, profile completeness |
+| **Configurable Actions** | Comment, label, or auto-close — you control the response |
+| **Zero False Positives on Collaborators** | Owners, members, and collaborators are auto-exempt |
+
+## Quick Start
+
+```yaml
+# .github/workflows/shield.yml
+name: Maintainer Shield
+on:
+  pull_request:
+    types: [opened, reopened]
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  shield:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ShipItAndPray/maintainer-shield@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+That's it. Slop detection + issue triage + reputation scoring in 5 lines.
+
+## Configuration
+
+```yaml
+- uses: ShipItAndPray/maintainer-shield@main
+  with:
+    github-token: ${{ secrets.GITHUB_TOKEN }}
+
+    # PR Slop Detection
+    slop-detection: 'true'          # Enable/disable
+    slop-action: 'comment'          # comment | label | close
+    slop-label: 'ai-slop'           # Label for flagged PRs
+    slop-threshold: '4'             # Checks that must fail (1-10, higher = fewer flags)
+
+    # Issue Triage
+    issue-triage: 'true'            # Enable/disable
+    issue-labels: 'bug,feature,question,documentation'  # Labels to auto-apply
+
+    # Reputation
+    reputation-check: 'true'        # Enable/disable
+    reputation-min-score: '20'      # Min score before flagging (0-100)
+
+    # General
+    exempt-users: 'dependabot,renovate'  # Always exempt these users
+    exempt-roles: 'OWNER,MEMBER,COLLABORATOR'  # Exempt these roles
+    dry-run: 'false'                # Log only, no actions
+```
+
+## Slop Detection Checks
+
+| Check | Severity | What It Catches |
+|-------|----------|----------------|
+| `branch-name` | medium | Default/spam branch patterns (patch-1, main) |
+| `title-quality` | medium | Vague or AI-typical titles |
+| `description-exists` | high | Missing or empty descriptions |
+| `description-ai-patterns` | high | AI-typical phrases (delve, leverage, seamless, etc.) |
+| `description-length` | low | Extremely verbose descriptions for tiny changes |
+| `commit-messages` | medium | Generic or uniformly formatted commits |
+| `commit-timing` | medium | Machine-speed commits (all within 60 seconds) |
+| `commit-count` | low | Single commit with 500+ line changes |
+| `file-count` | medium | PRs touching 30+ files |
+| `change-ratio` | low | 95%+ additions with no deletions across many files |
+| `unrelated-files` | medium | Files spread across many unrelated directories |
+| `whitespace-changes` | medium | Mostly whitespace/formatting-only changes |
+| `submission-speed` | high | PR submitted minutes after first commit on large changes |
+| `author-pr-volume` | critical | Author submitting 10+ PRs in 24 hours across repos |
+| `author-association` | low | First-time contributor (informational, not penalizing) |
+
+## Reputation Scoring
+
+Contributors are scored 0-100 based on:
+
+| Signal | Impact | Why |
+|--------|--------|-----|
+| Account age | -20 to +15 | New accounts are higher risk |
+| Public repos | -10 to +10 | Established developers have repos |
+| Followers | -5 to +10 | Social proof of real activity |
+| Avatar & bio | -7 to +5 | Profile completeness signals intent |
+| Merged PRs in repo | 0 to +20 | Prior accepted contributions = trust |
+| Recent public activity | -5 to +10 | Active contributors are more reliable |
+
+Levels: `unknown` (0-19) | `low` (20-39) | `medium` (40-59) | `high` (60-79) | `trusted` (80-100)
+
+## Why Not Just Use [X]?
+
+| Tool | What It Does | What's Missing |
+|------|-------------|---------------|
+| [anti-slop](https://github.com/peakoss/anti-slop) | Regex-based PR filtering (31 checks) | No issue triage, no reputation, no learning |
+| [Good Egg](https://github.com/2ndSetAI/good-egg) | Author trust scoring | Scoring only, no auto-close, no issues |
+| [trIAge](https://github.com/trIAgelab/trIAge) | Issue labeling + responses | Issues only, no PR handling |
+| GitHub Agentic Workflows | Issue triage (beta) | Issues only, no slop detection |
+| **Maintainer Shield** | **All of the above in one action** | **You're looking at it** |
+
+## Outputs
+
+```yaml
+steps:
+  - uses: ShipItAndPray/maintainer-shield@main
+    id: shield
+    with:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  - run: |
+      echo "Slop score: ${{ steps.shield.outputs.slop-score }}"
+      echo "Reputation: ${{ steps.shield.outputs.reputation-score }}"
+      echo "Action: ${{ steps.shield.outputs.action-taken }}"
+      echo "Failed checks: ${{ steps.shield.outputs.checks-failed }}"
+```
+
+## Philosophy
+
+1. **Conservative by default.** High threshold, comment-only. You choose to escalate.
+2. **Anti-slop, not anti-AI.** Good AI-assisted PRs with real descriptions and tested code will pass.
+3. **Maintainers are in control.** Every setting is configurable. Exempt whoever you want.
+4. **Transparent.** Every check is documented. Every flag is explained. No black boxes.
+
+## The Problem
+
+> "AI slop PRs are becoming increasingly draining and demoralizing for Godot maintainers."
+> — [Remi Verschelde, Godot Engine](https://www.theregister.com/2026/02/18/godot_maintainers_struggle_with_draining/)
+
+> "Much of open source is really at risk."
+> — [GitHub Community Discussion](https://github.com/orgs/community/discussions/185387)
+
+> "Only 1 out of 10 PRs created with AI is legitimate."
+> — [Xavier Portilla Edo, Voiceflow](https://www.theregister.com/2026/02/03/github_kill_switch_pull_requests_ai/)
+
+## Contributing
+
+Found a false positive? Have a check idea? PRs welcome.
+
+This is anti-slop, not anti-contributor. If you're reading this and thinking about how to make open source better, you're exactly who this is for.
+
+## License
+
+MIT
