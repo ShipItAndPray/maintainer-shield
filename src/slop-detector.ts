@@ -12,7 +12,6 @@ const AI_DESCRIPTION_PATTERNS = [
   /\binnovative approach\b/i,
   /\bleverage\b/i,
   /\bparadigm\b/i,
-  /\brobust\b/i,
   /\bseamless\b/i,
   /\bsynerg/i,
   /\btapestry\b/i,
@@ -51,6 +50,7 @@ interface PRData {
   headRef: string
   authorLogin: string
   authorAssociation: string
+  maintainerCanModify?: boolean
   commits: Array<{ message: string; authorDate: string }>
   files: Array<{ filename: string; additions: number; deletions: number; patch?: string }>
   createdAt: string
@@ -98,11 +98,11 @@ export async function detectSlop(
 
   // === BEHAVIORAL CHECKS ===
   checks.push(checkSubmissionSpeed(pr))
-  checks.push(await checkAuthorPRVolume(octokit, owner, repo, pr))
+  checks.push(await checkAuthorPRVolume(octokit, pr))
   checks.push(checkAuthorAssociation(pr))
   checks.push(checkDescriptionMatchesChanges(pr))
   checks.push(checkEmojiSpam(pr))
-  checks.push(await checkMaintainerCanModify(octokit, owner, repo, prNumber))
+  checks.push(checkMaintainerCanModify(pr))
 
   const failedChecks = checks.filter(c => !c.passed)
   const score = failedChecks.reduce((sum, c) => {
@@ -264,20 +264,15 @@ function checkEmojiSpam(pr: PRData): SlopCheck {
   }
 }
 
-async function checkMaintainerCanModify(octokit: Octokit, owner: string, repo: string, prNumber: number): Promise<SlopCheck> {
-  try {
-    const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: prNumber })
-    const canModify = pr.maintainer_can_modify
+function checkMaintainerCanModify(pr: PRData): SlopCheck {
+  const canModify = pr.maintainerCanModify
 
-    return {
-      name: 'maintainer-can-modify',
-      description: 'PR allows maintainers to push commits',
-      passed: canModify !== false,
-      severity: 'medium',
-      details: !canModify ? 'Author disabled maintainer edit access' : undefined,
-    }
-  } catch {
-    return { name: 'maintainer-can-modify', description: 'PR allows maintainers to push commits', passed: true, severity: 'medium' }
+  return {
+    name: 'maintainer-can-modify',
+    description: 'PR allows maintainers to push commits',
+    passed: canModify !== false,
+    severity: 'medium',
+    details: canModify === false ? 'Author disabled maintainer edit access' : undefined,
   }
 }
 
@@ -289,8 +284,8 @@ async function fetchPRData(
 ): Promise<PRData> {
   const [prResponse, commitsResponse, filesResponse] = await Promise.all([
     octokit.rest.pulls.get({ owner, repo, pull_number: prNumber }),
-    octokit.rest.pulls.listCommits({ owner, repo, pull_number: prNumber, per_page: 100 }),
-    octokit.rest.pulls.listFiles({ owner, repo, pull_number: prNumber, per_page: 100 }),
+    octokit.paginate(octokit.rest.pulls.listCommits, { owner, repo, pull_number: prNumber, per_page: 100 }),
+    octokit.paginate(octokit.rest.pulls.listFiles, { owner, repo, pull_number: prNumber, per_page: 100 }),
   ])
 
   return {
@@ -299,11 +294,12 @@ async function fetchPRData(
     headRef: prResponse.data.head.ref,
     authorLogin: prResponse.data.user?.login || '',
     authorAssociation: prResponse.data.author_association,
-    commits: commitsResponse.data.map(c => ({
+    maintainerCanModify: prResponse.data.maintainer_can_modify,
+    commits: commitsResponse.map(c => ({
       message: c.commit.message,
       authorDate: c.commit.author?.date || '',
     })),
-    files: filesResponse.data.map(f => ({
+    files: filesResponse.map(f => ({
       filename: f.filename,
       additions: f.additions,
       deletions: f.deletions,
@@ -496,9 +492,10 @@ function checkWhitespaceOnlyChanges(pr: PRData): SlopCheck {
   const whitespaceOnly = pr.files.filter(f => {
     if (!f.patch) return false
     const lines = f.patch.split('\n').filter(l => l.startsWith('+') || l.startsWith('-'))
+    if (lines.length === 0) return false
     return lines.every(l => {
       const content = l.slice(1)
-      return content.trim() === '' || content === content.trimEnd()
+      return !/[A-Za-z0-9]/.test(content)
     })
   })
 
@@ -534,10 +531,11 @@ function checkSubmissionSpeed(pr: PRData): SlopCheck {
   }
 }
 
-async function checkAuthorPRVolume(octokit: Octokit, owner: string, repo: string, pr: PRData): Promise<SlopCheck> {
+async function checkAuthorPRVolume(octokit: Octokit, pr: PRData): Promise<SlopCheck> {
   try {
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
     const { data: userPRs } = await octokit.rest.search.issuesAndPullRequests({
-      q: `type:pr author:${pr.authorLogin} created:>${new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0]}`,
+      q: `type:pr author:${pr.authorLogin} created:>=${twentyFourHoursAgo}`,
       per_page: 1,
     })
 

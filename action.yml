@@ -10,7 +10,6 @@ inputs:
   github-token:
     description: 'GitHub token for API access'
     required: true
-    default: ${{ github.token }}
 
   # PR Slop Detection
   slop-detection:
@@ -29,7 +28,7 @@ inputs:
     default: 'ai-slop'
 
   slop-threshold:
-    description: 'Min failed checks before flagging (1-10). Higher = fewer false positives.'
+    description: 'Min failed checks before flagging (1-21). Higher = fewer false positives.'
     required: false
     default: '4'
 

@@ -89,6 +89,9 @@ export async function triageIssue(
 
   // Check for duplicates
   const duplicate = await findDuplicate(octokit, owner, repo, title, issueNumber)
+  if (duplicate !== null && allowedLabels.includes('duplicate')) {
+    suggestedLabels.push('duplicate')
+  }
 
   return {
     suggestedLabels,

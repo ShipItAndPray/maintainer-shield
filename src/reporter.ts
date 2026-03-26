@@ -1,13 +1,27 @@
-import { ShieldReport, SlopReport, ReputationReport, IssueTriageReport } from './types'
+import { ShieldReport, SlopReport, ReputationReport, IssueTriageReport, PRReviewTriggers } from './types'
 
-export function formatPRComment(slop: SlopReport, reputation: ReputationReport, dryRun: boolean): string {
-  const shield = slop.isSlop ? '🛡️' : '✅'
-  const status = slop.isSlop ? 'Flagged for review' : 'Passed'
+export function formatPRComment(
+  slop: SlopReport,
+  reputation: ReputationReport,
+  triggers: PRReviewTriggers,
+  dryRun: boolean
+): string {
+  const flagged = triggers.slopTriggered || triggers.reputationTriggered
+  const shield = flagged ? '🛡️' : '✅'
+  const status = flagged ? 'Flagged for review' : 'Passed'
+  const reasons: string[] = []
+
+  if (triggers.slopTriggered) reasons.push('slop signals exceeded the configured threshold')
+  if (triggers.reputationTriggered) reasons.push('contributor reputation is below the configured minimum')
 
   let comment = `## ${shield} Maintainer Shield — ${status}\n\n`
 
   if (dryRun) {
     comment += `> **DRY RUN** — No actions taken\n\n`
+  }
+
+  if (reasons.length > 0) {
+    comment += `**Why this was flagged:** ${reasons.join('; ')}.\n\n`
   }
 
   // Slop Analysis
@@ -54,7 +68,7 @@ export function formatPRComment(slop: SlopReport, reputation: ReputationReport, 
   comment += `\n</details>\n\n`
 
   // What to do
-  if (slop.isSlop) {
+  if (flagged) {
     comment += `---\n\n`
     comment += `> **To the PR author:** If this is a legitimate contribution, please ensure your PR follows the project's contribution guidelines. `
     comment += `Consider adding a detailed description explaining *why* this change is needed and *how* you tested it.\n\n`

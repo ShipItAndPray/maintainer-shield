@@ -13,7 +13,7 @@ Maintainer Shield fights back.
 | **Slop Detection** | 21 checks across branch names, descriptions, commit patterns, timing, file analysis, code quality, and behavioral signals |
 | **Issue Triage** | Auto-labels issues as bug/feature/question/docs, detects duplicates |
 | **Reputation Scoring** | Scores contributors 0-100 based on account age, history, merged PRs, profile completeness |
-| **Configurable Actions** | Comment, label, or auto-close — you control the response |
+| **Configurable Actions** | Comment, label, or auto-close for slop PRs; low reputation stays comment-only |
 | **Zero False Positives on Collaborators** | Owners, members, and collaborators are auto-exempt |
 
 ## Quick Start
@@ -54,7 +54,7 @@ That's it. Slop detection + issue triage + reputation scoring in 5 lines.
     slop-detection: 'true'          # Enable/disable
     slop-action: 'comment'          # comment | label | close
     slop-label: 'ai-slop'           # Label for flagged PRs
-    slop-threshold: '4'             # Checks that must fail (1-10, higher = fewer flags)
+    slop-threshold: '4'             # Checks that must fail (1-21, higher = fewer flags)
 
     # Issue Triage
     issue-triage: 'true'            # Enable/disable
@@ -62,7 +62,7 @@ That's it. Slop detection + issue triage + reputation scoring in 5 lines.
 
     # Reputation
     reputation-check: 'true'        # Enable/disable
-    reputation-min-score: '20'      # Min score before flagging (0-100)
+    reputation-min-score: '20'      # Min score before flagging for review (0-100)
 
     # General
     exempt-users: 'dependabot,renovate'  # Always exempt these users
@@ -140,9 +140,10 @@ steps:
 ## Philosophy
 
 1. **Conservative by default.** High threshold, comment-only. You choose to escalate.
-2. **Anti-slop, not anti-AI.** Good AI-assisted PRs with real descriptions and tested code will pass.
-3. **Maintainers are in control.** Every setting is configurable. Exempt whoever you want.
-4. **Transparent.** Every check is documented. Every flag is explained. No black boxes.
+2. **Low reputation is advisory.** Reputation can trigger a review comment, but only slop detection escalates to label/close.
+3. **Anti-slop, not anti-AI.** Good AI-assisted PRs with real descriptions and tested code will pass.
+4. **Maintainers are in control.** Every setting is configurable. Exempt whoever you want.
+5. **Transparent.** Every check is documented. Every flag is explained. No black boxes.
 
 ## The Problem
 

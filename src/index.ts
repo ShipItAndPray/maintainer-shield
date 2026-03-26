@@ -6,20 +6,80 @@ import { scoreReputation } from './reputation'
 import { triageIssue } from './issue-triage'
 import { formatPRComment, formatIssueComment, buildShieldReport } from './reporter'
 
+function parseBooleanInput(name: string, defaultValue: boolean): boolean {
+  const raw = core.getInput(name)
+  if (!raw) return defaultValue
+
+  const normalized = raw.trim().toLowerCase()
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false
+
+  throw new Error(`Invalid boolean input for "${name}": ${raw}`)
+}
+
+function parseIntegerInput(name: string, defaultValue: number, min: number, max: number): number {
+  const raw = core.getInput(name)
+  if (!raw) return defaultValue
+
+  const value = parseInt(raw, 10)
+  if (Number.isNaN(value) || value < min || value > max) {
+    throw new Error(`Invalid integer input for "${name}": ${raw}. Expected ${min}-${max}.`)
+  }
+
+  return value
+}
+
+function parseCsvInput(name: string, defaultValue: string[] = []): string[] {
+  const raw = core.getInput(name)
+  if (!raw) return [...defaultValue]
+
+  return raw.split(',').map(value => value.trim()).filter(Boolean)
+}
+
+function parseSlopAction(): Config['slopAction'] {
+  const raw = (core.getInput('slop-action') || 'comment').trim().toLowerCase()
+  if (raw === 'comment' || raw === 'label' || raw === 'close') return raw
+  throw new Error(`Invalid slop-action: ${raw}. Expected comment, label, or close.`)
+}
+
 function getConfig(): Config {
   return {
     githubToken: core.getInput('github-token', { required: true }),
-    slopDetection: core.getInput('slop-detection') !== 'false',
-    slopAction: core.getInput('slop-action') as Config['slopAction'],
+    slopDetection: parseBooleanInput('slop-detection', true),
+    slopAction: parseSlopAction(),
     slopLabel: core.getInput('slop-label') || 'ai-slop',
-    slopThreshold: parseInt(core.getInput('slop-threshold') || '4', 10),
-    issueTriage: core.getInput('issue-triage') !== 'false',
-    issueLabels: (core.getInput('issue-labels') || 'bug,feature,question,documentation').split(',').map(l => l.trim()),
-    reputationCheck: core.getInput('reputation-check') !== 'false',
-    reputationMinScore: parseInt(core.getInput('reputation-min-score') || '20', 10),
-    exemptUsers: (core.getInput('exempt-users') || '').split(',').map(u => u.trim()).filter(Boolean),
-    exemptRoles: (core.getInput('exempt-roles') || 'OWNER,MEMBER,COLLABORATOR').split(',').map(r => r.trim()),
-    dryRun: core.getInput('dry-run') === 'true',
+    slopThreshold: parseIntegerInput('slop-threshold', 4, 1, 21),
+    issueTriage: parseBooleanInput('issue-triage', true),
+    issueLabels: parseCsvInput('issue-labels', ['bug', 'feature', 'question', 'documentation']),
+    reputationCheck: parseBooleanInput('reputation-check', true),
+    reputationMinScore: parseIntegerInput('reputation-min-score', 20, 0, 100),
+    exemptUsers: parseCsvInput('exempt-users').map(u => u.toLowerCase()),
+    exemptRoles: parseCsvInput('exempt-roles', ['OWNER', 'MEMBER', 'COLLABORATOR']).map(r => r.toUpperCase()),
+    dryRun: parseBooleanInput('dry-run', false),
+  }
+}
+
+async function ensureLabelExists(
+  octokit: ReturnType<typeof github.getOctokit>,
+  owner: string,
+  repo: string,
+  name: string,
+  color: string,
+  description?: string
+): Promise<void> {
+  try {
+    await octokit.rest.issues.getLabel({ owner, repo, name })
+  } catch (error) {
+    const status = typeof error === 'object' && error !== null && 'status' in error ? error.status : undefined
+    if (status !== 404) throw error
+
+    await octokit.rest.issues.createLabel({
+      owner,
+      repo,
+      name,
+      color,
+      description,
+    })
   }
 }
 
@@ -35,17 +95,18 @@ async function handlePullRequest(config: Config): Promise<void> {
 
   const prNumber = pr.number
   const authorLogin = pr.user?.login || ''
+  const normalizedAuthorLogin = authorLogin.toLowerCase()
   const authorAssociation = pr.author_association || ''
 
   core.info(`🛡️ Maintainer Shield analyzing PR #${prNumber} by @${authorLogin}`)
 
   // Check exemptions
-  if (config.exemptUsers.includes(authorLogin)) {
+  if (config.exemptUsers.includes(normalizedAuthorLogin)) {
     core.info(`✅ @${authorLogin} is exempt — skipping`)
     return
   }
 
-  if (config.exemptRoles.includes(authorAssociation)) {
+  if (config.exemptRoles.includes(authorAssociation.toUpperCase())) {
     core.info(`✅ @${authorLogin} is ${authorAssociation} — skipping`)
     return
   }
@@ -82,10 +143,11 @@ async function handlePullRequest(config: Config): Promise<void> {
       actionTaken = 'none'
     } else {
       // Comment
-      if (['comment', 'label', 'close'].includes(config.slopAction)) {
+      if (['comment', 'label', 'close'].includes(config.slopAction) || reputationTriggered) {
         const comment = formatPRComment(
           slopReport ?? { score: 0, maxScore: 10, checks: [], failedChecks: 0, isSlop: false, confidence: 'low' },
           reputationReport ?? { score: 50, level: 'medium', accountAgeDays: 0, publicRepos: 0, followers: 0, totalContributions: 0, mergedPRsInOrg: 0, hasAvatar: true, hasBio: false, flags: ['Reputation check disabled'] },
+          { slopTriggered, reputationTriggered },
           config.dryRun
         )
         await octokit.rest.issues.createComment({
@@ -99,18 +161,16 @@ async function handlePullRequest(config: Config): Promise<void> {
       }
 
       // Label
-      if (['label', 'close'].includes(config.slopAction)) {
+      if (slopTriggered && ['label', 'close'].includes(config.slopAction)) {
         try {
-          // Ensure label exists
-          await octokit.rest.issues.getLabel({ owner, repo, name: config.slopLabel }).catch(async () => {
-            await octokit.rest.issues.createLabel({
-              owner,
-              repo,
-              name: config.slopLabel,
-              color: 'e11d48',
-              description: 'Flagged by Maintainer Shield as potential AI slop',
-            })
-          })
+          await ensureLabelExists(
+            octokit,
+            owner,
+            repo,
+            config.slopLabel,
+            'e11d48',
+            'Flagged by Maintainer Shield as potential AI slop'
+          )
 
           await octokit.rest.issues.addLabels({
             owner,
@@ -126,7 +186,7 @@ async function handlePullRequest(config: Config): Promise<void> {
       }
 
       // Close
-      if (config.slopAction === 'close') {
+      if (slopTriggered && config.slopAction === 'close') {
         await octokit.rest.pulls.update({
           owner,
           repo,
@@ -161,25 +221,26 @@ async function handleIssue(config: Config): Promise<void> {
     return
   }
 
-  // Skip if already labeled
-  if (issue.labels && issue.labels.length > 0) {
-    core.info('Issue already has labels — skipping triage')
-    return
-  }
-
   const issueNumber = issue.number
   const authorLogin = issue.user?.login || ''
+  const normalizedAuthorLogin = authorLogin.toLowerCase()
+  const existingLabels = new Set(
+    (issue.labels || [])
+      .map((label: string | { name?: string | null }) => typeof label === 'string' ? label : label.name || '')
+      .filter(Boolean)
+  )
 
   core.info(`🏷️ Maintainer Shield triaging issue #${issueNumber} by @${authorLogin}`)
 
   // Check exemptions
-  if (config.exemptUsers.includes(authorLogin)) {
+  if (config.exemptUsers.includes(normalizedAuthorLogin)) {
     core.info(`✅ @${authorLogin} is exempt — skipping`)
     return
   }
 
   const triageReport = await triageIssue(octokit, owner, repo, issueNumber, config.issueLabels)
-  core.info(`Category: ${triageReport.category}, labels: ${triageReport.suggestedLabels.join(', ')}, duplicate: ${triageReport.isDuplicate}`)
+  const labelsToApply = triageReport.suggestedLabels.filter(label => !existingLabels.has(label))
+  core.info(`Category: ${triageReport.category}, labels: ${labelsToApply.join(', ')}, duplicate: ${triageReport.isDuplicate}`)
 
   if (config.dryRun) {
     core.info('DRY RUN — would have applied labels and commented')
@@ -189,36 +250,29 @@ async function handleIssue(config: Config): Promise<void> {
   let actionTaken: ShieldReport['actionTaken'] = 'none'
 
   // Apply labels
-  if (triageReport.suggestedLabels.length > 0 && triageReport.confidence !== 'low') {
+  if (labelsToApply.length > 0 && triageReport.confidence !== 'low') {
     try {
-      // Ensure labels exist
-      for (const label of triageReport.suggestedLabels) {
-        await octokit.rest.issues.getLabel({ owner, repo, name: label }).catch(async () => {
-          const colors: Record<string, string> = {
-            bug: 'd73a4a',
-            feature: 'a2eeef',
-            question: 'd876e3',
-            documentation: '0075ca',
-            'good-first-issue': '7057ff',
-            duplicate: 'cfd3d7',
-          }
-          await octokit.rest.issues.createLabel({
-            owner,
-            repo,
-            name: label,
-            color: colors[label] || 'ededed',
-          })
-        })
+      const colors: Record<string, string> = {
+        bug: 'd73a4a',
+        feature: 'a2eeef',
+        question: 'd876e3',
+        documentation: '0075ca',
+        'good-first-issue': '7057ff',
+        duplicate: 'cfd3d7',
+      }
+
+      for (const label of labelsToApply) {
+        await ensureLabelExists(octokit, owner, repo, label, colors[label] || 'ededed')
       }
 
       await octokit.rest.issues.addLabels({
         owner,
         repo,
         issue_number: issueNumber,
-        labels: triageReport.suggestedLabels,
+        labels: labelsToApply,
       })
       actionTaken = 'labeled'
-      core.info(`Applied labels: ${triageReport.suggestedLabels.join(', ')}`)
+      core.info(`Applied labels: ${labelsToApply.join(', ')}`)
     } catch (err) {
       core.warning(`Failed to apply labels: ${err}`)
     }

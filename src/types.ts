@@ -59,3 +59,8 @@ export interface ShieldReport {
   actionTaken: 'none' | 'commented' | 'labeled' | 'closed'
   timestamp: string
 }
+
+export interface PRReviewTriggers {
+  slopTriggered: boolean
+  reputationTriggered: boolean
+}

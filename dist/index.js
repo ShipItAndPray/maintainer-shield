@@ -29967,21 +29967,71 @@ const slop_detector_1 = __nccwpck_require__(8622);
 const reputation_1 = __nccwpck_require__(4488);
 const issue_triage_1 = __nccwpck_require__(3157);
 const reporter_1 = __nccwpck_require__(5622);
+function parseBooleanInput(name, defaultValue) {
+    const raw = core.getInput(name);
+    if (!raw)
+        return defaultValue;
+    const normalized = raw.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized))
+        return true;
+    if (['false', '0', 'no', 'off'].includes(normalized))
+        return false;
+    throw new Error(`Invalid boolean input for "${name}": ${raw}`);
+}
+function parseIntegerInput(name, defaultValue, min, max) {
+    const raw = core.getInput(name);
+    if (!raw)
+        return defaultValue;
+    const value = parseInt(raw, 10);
+    if (Number.isNaN(value) || value < min || value > max) {
+        throw new Error(`Invalid integer input for "${name}": ${raw}. Expected ${min}-${max}.`);
+    }
+    return value;
+}
+function parseCsvInput(name, defaultValue = []) {
+    const raw = core.getInput(name);
+    if (!raw)
+        return [...defaultValue];
+    return raw.split(',').map(value => value.trim()).filter(Boolean);
+}
+function parseSlopAction() {
+    const raw = (core.getInput('slop-action') || 'comment').trim().toLowerCase();
+    if (raw === 'comment' || raw === 'label' || raw === 'close')
+        return raw;
+    throw new Error(`Invalid slop-action: ${raw}. Expected comment, label, or close.`);
+}
 function getConfig() {
     return {
         githubToken: core.getInput('github-token', { required: true }),
-        slopDetection: core.getInput('slop-detection') !== 'false',
-        slopAction: core.getInput('slop-action'),
+        slopDetection: parseBooleanInput('slop-detection', true),
+        slopAction: parseSlopAction(),
         slopLabel: core.getInput('slop-label') || 'ai-slop',
-        slopThreshold: parseInt(core.getInput('slop-threshold') || '4', 10),
-        issueTriage: core.getInput('issue-triage') !== 'false',
-        issueLabels: (core.getInput('issue-labels') || 'bug,feature,question,documentation').split(',').map(l => l.trim()),
-        reputationCheck: core.getInput('reputation-check') !== 'false',
-        reputationMinScore: parseInt(core.getInput('reputation-min-score') || '20', 10),
-        exemptUsers: (core.getInput('exempt-users') || '').split(',').map(u => u.trim()).filter(Boolean),
-        exemptRoles: (core.getInput('exempt-roles') || 'OWNER,MEMBER,COLLABORATOR').split(',').map(r => r.trim()),
-        dryRun: core.getInput('dry-run') === 'true',
+        slopThreshold: parseIntegerInput('slop-threshold', 4, 1, 21),
+        issueTriage: parseBooleanInput('issue-triage', true),
+        issueLabels: parseCsvInput('issue-labels', ['bug', 'feature', 'question', 'documentation']),
+        reputationCheck: parseBooleanInput('reputation-check', true),
+        reputationMinScore: parseIntegerInput('reputation-min-score', 20, 0, 100),
+        exemptUsers: parseCsvInput('exempt-users').map(u => u.toLowerCase()),
+        exemptRoles: parseCsvInput('exempt-roles', ['OWNER', 'MEMBER', 'COLLABORATOR']).map(r => r.toUpperCase()),
+        dryRun: parseBooleanInput('dry-run', false),
     };
+}
+async function ensureLabelExists(octokit, owner, repo, name, color, description) {
+    try {
+        await octokit.rest.issues.getLabel({ owner, repo, name });
+    }
+    catch (error) {
+        const status = typeof error === 'object' && error !== null && 'status' in error ? error.status : undefined;
+        if (status !== 404)
+            throw error;
+        await octokit.rest.issues.createLabel({
+            owner,
+            repo,
+            name,
+            color,
+            description,
+        });
+    }
 }
 async function handlePullRequest(config) {
     const octokit = github.getOctokit(config.githubToken);
@@ -29993,14 +30043,15 @@ async function handlePullRequest(config) {
     }
     const prNumber = pr.number;
     const authorLogin = pr.user?.login || '';
+    const normalizedAuthorLogin = authorLogin.toLowerCase();
     const authorAssociation = pr.author_association || '';
     core.info(`🛡️ Maintainer Shield analyzing PR #${prNumber} by @${authorLogin}`);
     // Check exemptions
-    if (config.exemptUsers.includes(authorLogin)) {
+    if (config.exemptUsers.includes(normalizedAuthorLogin)) {
         core.info(`✅ @${authorLogin} is exempt — skipping`);
         return;
     }
-    if (config.exemptRoles.includes(authorAssociation)) {
+    if (config.exemptRoles.includes(authorAssociation.toUpperCase())) {
         core.info(`✅ @${authorLogin} is ${authorAssociation} — skipping`);
         return;
     }
@@ -30034,8 +30085,8 @@ async function handlePullRequest(config) {
         }
         else {
             // Comment
-            if (['comment', 'label', 'close'].includes(config.slopAction)) {
-                const comment = (0, reporter_1.formatPRComment)(slopReport ?? { score: 0, maxScore: 10, checks: [], failedChecks: 0, isSlop: false, confidence: 'low' }, reputationReport ?? { score: 50, level: 'medium', accountAgeDays: 0, publicRepos: 0, followers: 0, totalContributions: 0, mergedPRsInOrg: 0, hasAvatar: true, hasBio: false, flags: ['Reputation check disabled'] }, config.dryRun);
+            if (['comment', 'label', 'close'].includes(config.slopAction) || reputationTriggered) {
+                const comment = (0, reporter_1.formatPRComment)(slopReport ?? { score: 0, maxScore: 10, checks: [], failedChecks: 0, isSlop: false, confidence: 'low' }, reputationReport ?? { score: 50, level: 'medium', accountAgeDays: 0, publicRepos: 0, followers: 0, totalContributions: 0, mergedPRsInOrg: 0, hasAvatar: true, hasBio: false, flags: ['Reputation check disabled'] }, { slopTriggered, reputationTriggered }, config.dryRun);
                 await octokit.rest.issues.createComment({
                     owner,
                     repo,
@@ -30046,18 +30097,9 @@ async function handlePullRequest(config) {
                 core.info('Posted analysis comment');
             }
             // Label
-            if (['label', 'close'].includes(config.slopAction)) {
+            if (slopTriggered && ['label', 'close'].includes(config.slopAction)) {
                 try {
-                    // Ensure label exists
-                    await octokit.rest.issues.getLabel({ owner, repo, name: config.slopLabel }).catch(async () => {
-                        await octokit.rest.issues.createLabel({
-                            owner,
-                            repo,
-                            name: config.slopLabel,
-                            color: 'e11d48',
-                            description: 'Flagged by Maintainer Shield as potential AI slop',
-                        });
-                    });
+                    await ensureLabelExists(octokit, owner, repo, config.slopLabel, 'e11d48', 'Flagged by Maintainer Shield as potential AI slop');
                     await octokit.rest.issues.addLabels({
                         owner,
                         repo,
@@ -30072,7 +30114,7 @@ async function handlePullRequest(config) {
                 }
             }
             // Close
-            if (config.slopAction === 'close') {
+            if (slopTriggered && config.slopAction === 'close') {
                 await octokit.rest.pulls.update({
                     owner,
                     repo,
@@ -30103,56 +30145,48 @@ async function handleIssue(config) {
         core.info('No issue found in context');
         return;
     }
-    // Skip if already labeled
-    if (issue.labels && issue.labels.length > 0) {
-        core.info('Issue already has labels — skipping triage');
-        return;
-    }
     const issueNumber = issue.number;
     const authorLogin = issue.user?.login || '';
+    const normalizedAuthorLogin = authorLogin.toLowerCase();
+    const existingLabels = new Set((issue.labels || [])
+        .map((label) => typeof label === 'string' ? label : label.name || '')
+        .filter(Boolean));
     core.info(`🏷️ Maintainer Shield triaging issue #${issueNumber} by @${authorLogin}`);
     // Check exemptions
-    if (config.exemptUsers.includes(authorLogin)) {
+    if (config.exemptUsers.includes(normalizedAuthorLogin)) {
         core.info(`✅ @${authorLogin} is exempt — skipping`);
         return;
     }
     const triageReport = await (0, issue_triage_1.triageIssue)(octokit, owner, repo, issueNumber, config.issueLabels);
-    core.info(`Category: ${triageReport.category}, labels: ${triageReport.suggestedLabels.join(', ')}, duplicate: ${triageReport.isDuplicate}`);
+    const labelsToApply = triageReport.suggestedLabels.filter(label => !existingLabels.has(label));
+    core.info(`Category: ${triageReport.category}, labels: ${labelsToApply.join(', ')}, duplicate: ${triageReport.isDuplicate}`);
     if (config.dryRun) {
         core.info('DRY RUN — would have applied labels and commented');
         return;
     }
     let actionTaken = 'none';
     // Apply labels
-    if (triageReport.suggestedLabels.length > 0 && triageReport.confidence !== 'low') {
+    if (labelsToApply.length > 0 && triageReport.confidence !== 'low') {
         try {
-            // Ensure labels exist
-            for (const label of triageReport.suggestedLabels) {
-                await octokit.rest.issues.getLabel({ owner, repo, name: label }).catch(async () => {
-                    const colors = {
-                        bug: 'd73a4a',
-                        feature: 'a2eeef',
-                        question: 'd876e3',
-                        documentation: '0075ca',
-                        'good-first-issue': '7057ff',
-                        duplicate: 'cfd3d7',
-                    };
-                    await octokit.rest.issues.createLabel({
-                        owner,
-                        repo,
-                        name: label,
-                        color: colors[label] || 'ededed',
-                    });
-                });
+            const colors = {
+                bug: 'd73a4a',
+                feature: 'a2eeef',
+                question: 'd876e3',
+                documentation: '0075ca',
+                'good-first-issue': '7057ff',
+                duplicate: 'cfd3d7',
+            };
+            for (const label of labelsToApply) {
+                await ensureLabelExists(octokit, owner, repo, label, colors[label] || 'ededed');
             }
             await octokit.rest.issues.addLabels({
                 owner,
                 repo,
                 issue_number: issueNumber,
-                labels: triageReport.suggestedLabels,
+                labels: labelsToApply,
             });
             actionTaken = 'labeled';
-            core.info(`Applied labels: ${triageReport.suggestedLabels.join(', ')}`);
+            core.info(`Applied labels: ${labelsToApply.join(', ')}`);
         }
         catch (err) {
             core.warning(`Failed to apply labels: ${err}`);
@@ -30283,6 +30317,9 @@ async function triageIssue(octokit, owner, repo, issueNumber, allowedLabels) {
     }
     // Check for duplicates
     const duplicate = await findDuplicate(octokit, owner, repo, title, issueNumber);
+    if (duplicate !== null && allowedLabels.includes('duplicate')) {
+        suggestedLabels.push('duplicate');
+    }
     return {
         suggestedLabels,
         category: topCategory,
@@ -30351,12 +30388,21 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.formatPRComment = formatPRComment;
 exports.formatIssueComment = formatIssueComment;
 exports.buildShieldReport = buildShieldReport;
-function formatPRComment(slop, reputation, dryRun) {
-    const shield = slop.isSlop ? '🛡️' : '✅';
-    const status = slop.isSlop ? 'Flagged for review' : 'Passed';
+function formatPRComment(slop, reputation, triggers, dryRun) {
+    const flagged = triggers.slopTriggered || triggers.reputationTriggered;
+    const shield = flagged ? '🛡️' : '✅';
+    const status = flagged ? 'Flagged for review' : 'Passed';
+    const reasons = [];
+    if (triggers.slopTriggered)
+        reasons.push('slop signals exceeded the configured threshold');
+    if (triggers.reputationTriggered)
+        reasons.push('contributor reputation is below the configured minimum');
     let comment = `## ${shield} Maintainer Shield — ${status}\n\n`;
     if (dryRun) {
         comment += `> **DRY RUN** — No actions taken\n\n`;
+    }
+    if (reasons.length > 0) {
+        comment += `**Why this was flagged:** ${reasons.join('; ')}.\n\n`;
     }
     // Slop Analysis
     comment += `### PR Quality Analysis\n\n`;
@@ -30397,7 +30443,7 @@ function formatPRComment(slop, reputation, dryRun) {
     comment += `| Recent activity | ${reputation.totalContributions} events |\n`;
     comment += `\n</details>\n\n`;
     // What to do
-    if (slop.isSlop) {
+    if (flagged) {
         comment += `---\n\n`;
         comment += `> **To the PR author:** If this is a legitimate contribution, please ensure your PR follows the project's contribution guidelines. `;
         comment += `Consider adding a detailed description explaining *why* this change is needed and *how* you tested it.\n\n`;
@@ -30621,7 +30667,6 @@ const AI_DESCRIPTION_PATTERNS = [
     /\binnovative approach\b/i,
     /\bleverage\b/i,
     /\bparadigm\b/i,
-    /\brobust\b/i,
     /\bseamless\b/i,
     /\bsynerg/i,
     /\btapestry\b/i,
@@ -30677,11 +30722,11 @@ async function detectSlop(octokit, owner, repo, prNumber, threshold = 4) {
     checks.push(checkGeneratedCodeMarkers(pr));
     // === BEHAVIORAL CHECKS ===
     checks.push(checkSubmissionSpeed(pr));
-    checks.push(await checkAuthorPRVolume(octokit, owner, repo, pr));
+    checks.push(await checkAuthorPRVolume(octokit, pr));
     checks.push(checkAuthorAssociation(pr));
     checks.push(checkDescriptionMatchesChanges(pr));
     checks.push(checkEmojiSpam(pr));
-    checks.push(await checkMaintainerCanModify(octokit, owner, repo, prNumber));
+    checks.push(checkMaintainerCanModify(pr));
     const failedChecks = checks.filter(c => !c.passed);
     const score = failedChecks.reduce((sum, c) => {
         const weights = { low: 0.5, medium: 1, high: 1.5, critical: 2 };
@@ -30831,27 +30876,21 @@ function checkEmojiSpam(pr) {
         details: tooMany ? `Found ${emojiMatches.length} emoji in ${wordCount} words` : undefined,
     };
 }
-async function checkMaintainerCanModify(octokit, owner, repo, prNumber) {
-    try {
-        const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: prNumber });
-        const canModify = pr.maintainer_can_modify;
-        return {
-            name: 'maintainer-can-modify',
-            description: 'PR allows maintainers to push commits',
-            passed: canModify !== false,
-            severity: 'medium',
-            details: !canModify ? 'Author disabled maintainer edit access' : undefined,
-        };
-    }
-    catch {
-        return { name: 'maintainer-can-modify', description: 'PR allows maintainers to push commits', passed: true, severity: 'medium' };
-    }
+function checkMaintainerCanModify(pr) {
+    const canModify = pr.maintainerCanModify;
+    return {
+        name: 'maintainer-can-modify',
+        description: 'PR allows maintainers to push commits',
+        passed: canModify !== false,
+        severity: 'medium',
+        details: canModify === false ? 'Author disabled maintainer edit access' : undefined,
+    };
 }
 async function fetchPRData(octokit, owner, repo, prNumber) {
     const [prResponse, commitsResponse, filesResponse] = await Promise.all([
         octokit.rest.pulls.get({ owner, repo, pull_number: prNumber }),
-        octokit.rest.pulls.listCommits({ owner, repo, pull_number: prNumber, per_page: 100 }),
-        octokit.rest.pulls.listFiles({ owner, repo, pull_number: prNumber, per_page: 100 }),
+        octokit.paginate(octokit.rest.pulls.listCommits, { owner, repo, pull_number: prNumber, per_page: 100 }),
+        octokit.paginate(octokit.rest.pulls.listFiles, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ]);
     return {
         title: prResponse.data.title,
@@ -30859,11 +30898,12 @@ async function fetchPRData(octokit, owner, repo, prNumber) {
         headRef: prResponse.data.head.ref,
         authorLogin: prResponse.data.user?.login || '',
         authorAssociation: prResponse.data.author_association,
-        commits: commitsResponse.data.map(c => ({
+        maintainerCanModify: prResponse.data.maintainer_can_modify,
+        commits: commitsResponse.map(c => ({
             message: c.commit.message,
             authorDate: c.commit.author?.date || '',
         })),
-        files: filesResponse.data.map(f => ({
+        files: filesResponse.map(f => ({
             filename: f.filename,
             additions: f.additions,
             deletions: f.deletions,
@@ -31033,9 +31073,11 @@ function checkWhitespaceOnlyChanges(pr) {
         if (!f.patch)
             return false;
         const lines = f.patch.split('\n').filter(l => l.startsWith('+') || l.startsWith('-'));
+        if (lines.length === 0)
+            return false;
         return lines.every(l => {
             const content = l.slice(1);
-            return content.trim() === '' || content === content.trimEnd();
+            return !/[A-Za-z0-9]/.test(content);
         });
     });
     const ratio = whitespaceOnly.length / Math.max(1, pr.files.length);
@@ -31065,10 +31107,11 @@ function checkSubmissionSpeed(pr) {
         details: tooFast ? `PR submitted ${Math.round(minutesBetween)} minutes after first commit with ${pr.additions + pr.deletions} lines changed` : undefined,
     };
 }
-async function checkAuthorPRVolume(octokit, owner, repo, pr) {
+async function checkAuthorPRVolume(octokit, pr) {
     try {
+        const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
         const { data: userPRs } = await octokit.rest.search.issuesAndPullRequests({
-            q: `type:pr author:${pr.authorLogin} created:>${new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().split('T')[0]}`,
+            q: `type:pr author:${pr.authorLogin} created:>=${twentyFourHoursAgo}`,
             per_page: 1,
         });
         const highVolume = userPRs.total_count > 10;
