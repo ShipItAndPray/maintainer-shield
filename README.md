@@ -10,7 +10,7 @@ Maintainer Shield fights back.
 
 | Feature | Description |
 |---------|------------|
-| **Slop Detection** | 19 checks across branch names, descriptions, commit patterns, timing, file analysis, code quality, and behavioral signals |
+| **Slop Detection** | 21 checks across branch names, descriptions, commit patterns, timing, file analysis, code quality, and behavioral signals |
 | **Issue Triage** | Auto-labels issues as bug/feature/question/docs, detects duplicates |
 | **Reputation Scoring** | Scores contributors 0-100 based on account age, history, merged PRs, profile completeness |
 | **Configurable Actions** | Comment, label, or auto-close — you control the response |
@@ -93,6 +93,8 @@ That's it. Slop detection + issue triage + reputation scoring in 5 lines.
 | `author-pr-volume` | critical | Author submitting 10+ PRs in 24 hours across repos |
 | `author-association` | low | First-time contributor (informational, not penalizing) |
 | `description-matches-changes` | medium | Long description that doesn't reference any changed files |
+| `emoji-spam` | low | Excessive emoji in title/description |
+| `maintainer-can-modify` | medium | Author disabled maintainer edit access |
 
 ## Reputation Scoring
 

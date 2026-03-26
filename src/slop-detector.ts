@@ -101,6 +101,8 @@ export async function detectSlop(
   checks.push(await checkAuthorPRVolume(octokit, owner, repo, pr))
   checks.push(checkAuthorAssociation(pr))
   checks.push(checkDescriptionMatchesChanges(pr))
+  checks.push(checkEmojiSpam(pr))
+  checks.push(await checkMaintainerCanModify(octokit, owner, repo, prNumber))
 
   const failedChecks = checks.filter(c => !c.passed)
   const score = failedChecks.reduce((sum, c) => {
@@ -236,6 +238,46 @@ function checkDescriptionMatchesChanges(pr: PRData): SlopCheck {
     passed: !suspicious,
     severity: 'medium',
     details: suspicious ? `${bodyWords}-word description does not reference any of the ${pr.files.length} changed files` : undefined,
+  }
+}
+
+function checkEmojiSpam(pr: PRData): SlopCheck {
+  const body = pr.body || ''
+  const title = pr.title || ''
+  const text = `${title}\n${body}`
+
+  // Count emoji characters (Unicode emoji ranges)
+  const emojiRegex = /[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu
+  const emojiMatches = text.match(emojiRegex) || []
+  const wordCount = text.split(/\s+/).length
+
+  // More than 1 emoji per 20 words is suspicious
+  const ratio = emojiMatches.length / Math.max(1, wordCount / 20)
+  const tooMany = emojiMatches.length > 5 && ratio > 1
+
+  return {
+    name: 'emoji-spam',
+    description: 'PR description does not contain excessive emoji',
+    passed: !tooMany,
+    severity: 'low',
+    details: tooMany ? `Found ${emojiMatches.length} emoji in ${wordCount} words` : undefined,
+  }
+}
+
+async function checkMaintainerCanModify(octokit: Octokit, owner: string, repo: string, prNumber: number): Promise<SlopCheck> {
+  try {
+    const { data: pr } = await octokit.rest.pulls.get({ owner, repo, pull_number: prNumber })
+    const canModify = pr.maintainer_can_modify
+
+    return {
+      name: 'maintainer-can-modify',
+      description: 'PR allows maintainers to push commits',
+      passed: canModify !== false,
+      severity: 'medium',
+      details: !canModify ? 'Author disabled maintainer edit access' : undefined,
+    }
+  } catch {
+    return { name: 'maintainer-can-modify', description: 'PR allows maintainers to push commits', passed: true, severity: 'medium' }
   }
 }
 
