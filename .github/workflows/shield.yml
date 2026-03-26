@@ -1,0 +1,21 @@
+name: Maintainer Shield
+on:
+  pull_request:
+    types: [opened, reopened]
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  shield:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ShipItAndPray/maintainer-shield@main
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          slop-action: 'comment'
+          slop-threshold: '4'
