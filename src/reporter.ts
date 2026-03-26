@@ -37,7 +37,7 @@ export function formatPRComment(slop: SlopReport, reputation: ReputationReport, 
 
   // Reputation
   comment += `### Contributor Reputation\n\n`
-  const repIcon = reputation.level === 'trusted' ? '🟢' : reputation.level === 'high' ? '🟢' : reputation.level === 'medium' ? '🟡' : reputation.level === 'low' ? '🟠' : '🔴'
+  const repIcon = reputation.level === 'trusted' ? '🟢' : reputation.level === 'high' ? '🔵' : reputation.level === 'medium' ? '🟡' : reputation.level === 'low' ? '🟠' : '🔴'
   comment += `${repIcon} **${reputation.level.toUpperCase()}** (${reputation.score}/100)\n\n`
 
   if (reputation.flags.length > 0) {

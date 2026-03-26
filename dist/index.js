@@ -30008,7 +30008,7 @@ async function handlePullRequest(config) {
     let slopReport = undefined;
     if (config.slopDetection) {
         core.info('Running slop detection...');
-        slopReport = await (0, slop_detector_1.detectSlop)(octokit, owner, repo, prNumber);
+        slopReport = await (0, slop_detector_1.detectSlop)(octokit, owner, repo, prNumber, config.slopThreshold);
         core.info(`Slop score: ${slopReport.score}/10, failed: ${slopReport.failedChecks}, isSlop: ${slopReport.isSlop}`);
         core.setOutput('slop-score', slopReport.score.toString());
         core.setOutput('checks-failed', slopReport.failedChecks.toString());
@@ -30021,19 +30021,21 @@ async function handlePullRequest(config) {
         core.info(`Reputation: ${reputationReport.score}/100 (${reputationReport.level})`);
         core.setOutput('reputation-score', reputationReport.score.toString());
     }
-    // Determine action
+    // Determine action — either check can trigger independently
     let actionTaken = 'none';
-    const shouldAct = slopReport?.isSlop ||
-        (reputationReport && reputationReport.score < config.reputationMinScore);
-    if (shouldAct && slopReport && reputationReport) {
+    const slopTriggered = slopReport?.isSlop === true;
+    const reputationTriggered = reputationReport !== undefined && reputationReport.score < config.reputationMinScore;
+    const shouldAct = slopTriggered || reputationTriggered;
+    if (shouldAct) {
         if (config.dryRun) {
             core.info('DRY RUN — would have taken action');
+            core.info(`  Slop triggered: ${slopTriggered}, Reputation triggered: ${reputationTriggered}`);
             actionTaken = 'none';
         }
         else {
             // Comment
             if (['comment', 'label', 'close'].includes(config.slopAction)) {
-                const comment = (0, reporter_1.formatPRComment)(slopReport, reputationReport, config.dryRun);
+                const comment = (0, reporter_1.formatPRComment)(slopReport ?? { score: 0, maxScore: 10, checks: [], failedChecks: 0, isSlop: false, confidence: 'low' }, reputationReport ?? { score: 50, level: 'medium', accountAgeDays: 0, publicRepos: 0, followers: 0, totalContributions: 0, mergedPRsInOrg: 0, hasAvatar: true, hasBio: false, flags: ['Reputation check disabled'] }, config.dryRun);
                 await octokit.rest.issues.createComment({
                     owner,
                     repo,
@@ -30381,7 +30383,7 @@ function formatPRComment(slop, reputation, dryRun) {
     }
     // Reputation
     comment += `### Contributor Reputation\n\n`;
-    const repIcon = reputation.level === 'trusted' ? '🟢' : reputation.level === 'high' ? '🟢' : reputation.level === 'medium' ? '🟡' : reputation.level === 'low' ? '🟠' : '🔴';
+    const repIcon = reputation.level === 'trusted' ? '🟢' : reputation.level === 'high' ? '🔵' : reputation.level === 'medium' ? '🟡' : reputation.level === 'low' ? '🟠' : '🔴';
     comment += `${repIcon} **${reputation.level.toUpperCase()}** (${reputation.score}/100)\n\n`;
     if (reputation.flags.length > 0) {
         comment += `Flags: ${reputation.flags.map(f => `\`${f}\``).join(', ')}\n\n`;
@@ -30515,10 +30517,10 @@ async function scoreReputation(octokit, owner, repo, username) {
         score -= 10;
         flags.push('Multiple PRs but none merged in this repo');
     }
-    // Total contributions across GitHub (0-10 points)
+    // Recent public activity (last ~30 days via events API) (0-10 points)
     if (userActivity.totalContributions === 0) {
         score -= 5;
-        flags.push('No public contribution history');
+        flags.push('No recent public activity');
     }
     else if (userActivity.totalContributions < 10) {
         score += 3;
@@ -30649,7 +30651,7 @@ const SPAM_BRANCH_PATTERNS = [
     /^main$/,
     /^master$/,
 ];
-async function detectSlop(octokit, owner, repo, prNumber) {
+async function detectSlop(octokit, owner, repo, prNumber, threshold = 4) {
     const pr = await fetchPRData(octokit, owner, repo, prNumber);
     const checks = [];
     // === BRANCH CHECKS ===
@@ -30669,10 +30671,15 @@ async function detectSlop(octokit, owner, repo, prNumber) {
     checks.push(checkChangeSizeRatio(pr));
     checks.push(checkUnrelatedFiles(pr));
     checks.push(checkWhitespaceOnlyChanges(pr));
+    // === CODE QUALITY CHECKS ===
+    checks.push(checkTodoFixmeComments(pr));
+    checks.push(checkCopiedStackOverflow(pr));
+    checks.push(checkGeneratedCodeMarkers(pr));
     // === BEHAVIORAL CHECKS ===
     checks.push(checkSubmissionSpeed(pr));
     checks.push(await checkAuthorPRVolume(octokit, owner, repo, pr));
     checks.push(checkAuthorAssociation(pr));
+    checks.push(checkDescriptionMatchesChanges(pr));
     const failedChecks = checks.filter(c => !c.passed);
     const score = failedChecks.reduce((sum, c) => {
         const weights = { low: 0.5, medium: 1, high: 1.5, critical: 2 };
@@ -30688,8 +30695,119 @@ async function detectSlop(octokit, owner, repo, prNumber) {
         maxScore: 10,
         checks,
         failedChecks: failedChecks.length,
-        isSlop: failedChecks.length >= 4,
+        isSlop: failedChecks.length >= threshold,
         confidence: normalizedScore >= 7 ? 'high' : normalizedScore >= 4 ? 'medium' : 'low',
+    };
+}
+function checkTodoFixmeComments(pr) {
+    let todoCount = 0;
+    for (const file of pr.files) {
+        if (!file.patch)
+            continue;
+        const addedLines = file.patch.split('\n').filter(l => l.startsWith('+'));
+        for (const line of addedLines) {
+            if (/\b(TODO|FIXME|HACK|XXX)\b/.test(line))
+                todoCount++;
+        }
+    }
+    return {
+        name: 'todo-fixme-comments',
+        description: 'PR does not introduce excessive TODO/FIXME markers',
+        passed: todoCount <= 3,
+        severity: 'medium',
+        details: todoCount > 3 ? `Found ${todoCount} TODO/FIXME/HACK/XXX comments in new code` : undefined,
+    };
+}
+function checkCopiedStackOverflow(pr) {
+    // AI often generates code with placeholder comments or generic patterns
+    const suspiciousPatterns = [
+        /\/\/ ?(your |add |put |insert |replace |TODO:? ?implement)/i,
+        /\/\/ ?(this |the following|example|sample|placeholder)/i,
+        /# ?(your |add |put |insert |replace |TODO:? ?implement)/i,
+        /\bpassword\s*=\s*["']password["']/,
+        /\bapi_?key\s*=\s*["'](your|api|key|test|example|xxx)/i,
+        /\blorem ipsum\b/i,
+        /\bfoo\b.*\bbar\b.*\bbaz\b/,
+    ];
+    let matchCount = 0;
+    for (const file of pr.files) {
+        if (!file.patch)
+            continue;
+        const addedLines = file.patch.split('\n').filter(l => l.startsWith('+'));
+        for (const line of addedLines) {
+            for (const pattern of suspiciousPatterns) {
+                if (pattern.test(line)) {
+                    matchCount++;
+                    break;
+                }
+            }
+        }
+    }
+    return {
+        name: 'placeholder-code',
+        description: 'PR does not contain placeholder or example code',
+        passed: matchCount <= 2,
+        severity: 'high',
+        details: matchCount > 2 ? `Found ${matchCount} lines with placeholder/example code patterns` : undefined,
+    };
+}
+function checkGeneratedCodeMarkers(pr) {
+    // AI tools sometimes leave fingerprints
+    const generatedPatterns = [
+        /Generated by (Copilot|ChatGPT|Claude|Gemini|GPT|AI)/i,
+        /This (code|file|function) was (generated|created|written) (by|with|using) (an? )?(AI|LLM|language model)/i,
+        /\bco-?pilot\b/i,
+        /\bauto-?generated\b/i,
+    ];
+    let found = false;
+    let detail = '';
+    for (const file of pr.files) {
+        if (!file.patch)
+            continue;
+        const addedLines = file.patch.split('\n').filter(l => l.startsWith('+'));
+        for (const line of addedLines) {
+            for (const pattern of generatedPatterns) {
+                if (pattern.test(line)) {
+                    found = true;
+                    detail = line.slice(1).trim().slice(0, 80);
+                    break;
+                }
+            }
+            if (found)
+                break;
+        }
+        if (found)
+            break;
+    }
+    return {
+        name: 'generated-code-markers',
+        description: 'PR does not contain AI-generated code markers',
+        passed: !found,
+        severity: 'medium',
+        details: found ? `Found AI generation marker: "${detail}"` : undefined,
+    };
+}
+function checkDescriptionMatchesChanges(pr) {
+    const body = (pr.body || '').toLowerCase();
+    if (!body || body.length < 20)
+        return { name: 'description-matches-changes', description: 'Description references actual changed files/code', passed: true, severity: 'medium' };
+    // Check if description mentions any of the changed files or directories
+    const changedPaths = pr.files.map(f => f.filename.toLowerCase());
+    const changedNames = changedPaths.map(p => {
+        const parts = p.split('/');
+        return parts[parts.length - 1].replace(/\.[^.]+$/, '');
+    });
+    const mentionsFiles = changedNames.some(name => name.length > 3 && body.includes(name));
+    const mentionsCode = /```[\s\S]*```/.test(pr.body || '') || body.includes('function') || body.includes('class') || body.includes('method');
+    // Long description that doesn't reference any changed files = suspicious
+    const bodyWords = body.split(/\s+/).length;
+    const suspicious = bodyWords > 100 && !mentionsFiles && !mentionsCode;
+    return {
+        name: 'description-matches-changes',
+        description: 'Description references actual changed files/code',
+        passed: !suspicious,
+        severity: 'medium',
+        details: suspicious ? `${bodyWords}-word description does not reference any of the ${pr.files.length} changed files` : undefined,
     };
 }
 async function fetchPRData(octokit, owner, repo, prNumber) {

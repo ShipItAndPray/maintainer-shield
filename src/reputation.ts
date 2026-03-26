@@ -80,10 +80,10 @@ export async function scoreReputation(
     flags.push('Multiple PRs but none merged in this repo')
   }
 
-  // Total contributions across GitHub (0-10 points)
+  // Recent public activity (last ~30 days via events API) (0-10 points)
   if (userActivity.totalContributions === 0) {
     score -= 5
-    flags.push('No public contribution history')
+    flags.push('No recent public activity')
   } else if (userActivity.totalContributions < 10) {
     score += 3
   } else if (userActivity.totalContributions < 100) {

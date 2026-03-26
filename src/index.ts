@@ -54,7 +54,7 @@ async function handlePullRequest(config: Config): Promise<void> {
   let slopReport = undefined
   if (config.slopDetection) {
     core.info('Running slop detection...')
-    slopReport = await detectSlop(octokit, owner, repo, prNumber)
+    slopReport = await detectSlop(octokit, owner, repo, prNumber, config.slopThreshold)
     core.info(`Slop score: ${slopReport.score}/10, failed: ${slopReport.failedChecks}, isSlop: ${slopReport.isSlop}`)
     core.setOutput('slop-score', slopReport.score.toString())
     core.setOutput('checks-failed', slopReport.failedChecks.toString())
@@ -69,19 +69,25 @@ async function handlePullRequest(config: Config): Promise<void> {
     core.setOutput('reputation-score', reputationReport.score.toString())
   }
 
-  // Determine action
+  // Determine action — either check can trigger independently
   let actionTaken: ShieldReport['actionTaken'] = 'none'
-  const shouldAct = slopReport?.isSlop ||
-    (reputationReport && reputationReport.score < config.reputationMinScore)
+  const slopTriggered = slopReport?.isSlop === true
+  const reputationTriggered = reputationReport !== undefined && reputationReport.score < config.reputationMinScore
+  const shouldAct = slopTriggered || reputationTriggered
 
-  if (shouldAct && slopReport && reputationReport) {
+  if (shouldAct) {
     if (config.dryRun) {
       core.info('DRY RUN — would have taken action')
+      core.info(`  Slop triggered: ${slopTriggered}, Reputation triggered: ${reputationTriggered}`)
       actionTaken = 'none'
     } else {
       // Comment
       if (['comment', 'label', 'close'].includes(config.slopAction)) {
-        const comment = formatPRComment(slopReport, reputationReport, config.dryRun)
+        const comment = formatPRComment(
+          slopReport ?? { score: 0, maxScore: 10, checks: [], failedChecks: 0, isSlop: false, confidence: 'low' },
+          reputationReport ?? { score: 50, level: 'medium', accountAgeDays: 0, publicRepos: 0, followers: 0, totalContributions: 0, mergedPRsInOrg: 0, hasAvatar: true, hasBio: false, flags: ['Reputation check disabled'] },
+          config.dryRun
+        )
         await octokit.rest.issues.createComment({
           owner,
           repo,
